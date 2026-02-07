@@ -46,17 +46,34 @@ class ObstacleExtractor(Node):
         clusters = self._cluster_indices(valid_idx)
 
         for cluster in clusters:
-            i_min = cluster[np.argmin(ranges[cluster])]
-            d = float(ranges[i_min])
+            cluster_ranges = ranges[cluster]
 
-            angle = msg.angle_min + i_min * msg.angle_increment + self.pose.theta
+            mask = np.isfinite(cluster_ranges)
+            cluster = cluster[mask]
+            cluster_ranges = cluster_ranges[mask]
+
+            if len(cluster) == 0:
+                continue
+
+            angles = msg.angle_min + cluster * msg.angle_increment + self.pose.theta
+
+            # Puntos XY globales
+            xs = self.pose.x + cluster_ranges * np.cos(angles)
+            ys = self.pose.y + cluster_ranges * np.sin(angles)
+
+            # Centroide
+            cx = float(np.mean(xs))
+            cy = float(np.mean(ys))
+
+            # Distancia centroide -> robot
+            dx = cx - self.pose.x
+            dy = cy - self.pose.y
+            d_centroid = float(math.sqrt(dx * dx + dy * dy))
 
             obs = Obstacle()
-
-            # ⬇️ Ensure Python floats go into ROS message
-            obs.x = float(self.pose.x + d * math.cos(angle))
-            obs.y = float(self.pose.y + d * math.sin(angle))
-            obs.distance = d
+            obs.x = cx
+            obs.y = cy
+            obs.distance = d_centroid
 
             obstacles_msg.obstacles.append(obs)
 
