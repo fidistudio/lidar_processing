@@ -1,10 +1,16 @@
 import rclpy
 from rclpy.node import Node
+
 from sensor_msgs.msg import LaserScan
-from geometry_msgs.msg import Pose2D
+from geometry_msgs.msg import PointStamped
 from robot_interfaces.msg import Obstacle, ObstacleArray
+
 import numpy as np
 import math
+
+import tf2_ros
+from tf2_ros import TransformException
+import tf2_geometry_msgs
 
 
 class ObstacleExtractor(Node):
@@ -13,31 +19,30 @@ class ObstacleExtractor(Node):
         super().__init__("obstacle_extractor")
 
         self.declare_parameter("scan_topic", "/scan")
-        self.declare_parameter("pose_topic", "/robot_pose")
         self.declare_parameter("obstacles_topic", "/obstacles")
+        self.declare_parameter("target_frame", "base_footprint")
 
         scan_topic = self.get_parameter("scan_topic").value
-        pose_topic = self.get_parameter("pose_topic").value
         obstacles_topic = self.get_parameter("obstacles_topic").value
-
-        self.pose = None
+        self.target_frame = self.get_parameter("target_frame").value
 
         self.create_subscription(LaserScan, scan_topic, self.scan_callback, 10)
-        self.create_subscription(Pose2D, pose_topic, self.pose_callback, 10)
-
         self.obstacle_pub = self.create_publisher(ObstacleArray, obstacles_topic, 10)
 
-    def pose_callback(self, msg: Pose2D) -> None:
-        self.pose = msg
+        # TF
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
     def scan_callback(self, msg: LaserScan) -> None:
-        if self.pose is None:
-            return
 
         ranges = np.array(msg.ranges)
+
+        # Índices válidos (sin inf / nan)
         valid_idx = np.where(np.isfinite(ranges))[0]
 
         obstacles_msg = ObstacleArray()
+        obstacles_msg.header = msg.header
+        obstacles_msg.header.frame_id = self.target_frame
 
         if len(valid_idx) == 0:
             self.obstacle_pub.publish(obstacles_msg)
@@ -46,34 +51,50 @@ class ObstacleExtractor(Node):
         clusters = self._cluster_indices(valid_idx)
 
         for cluster in clusters:
-            cluster_ranges = ranges[cluster]
 
-            mask = np.isfinite(cluster_ranges)
-            cluster = cluster[mask]
-            cluster_ranges = cluster_ranges[mask]
+            # Aseguramos que sea array 1D
+            cluster = np.array(cluster, dtype=int)
 
             if len(cluster) == 0:
                 continue
 
-            angles = msg.angle_min + cluster * msg.angle_increment + self.pose.theta
+            cluster_ranges = ranges[cluster]
 
-            # Puntos XY globales
-            xs = self.pose.x + cluster_ranges * np.cos(angles)
-            ys = self.pose.y + cluster_ranges * np.sin(angles)
+            # Ángulos en lidar_link
+            angles = msg.angle_min + cluster * msg.angle_increment
 
-            # Centroide
+            # Coordenadas en lidar_link
+            xs = cluster_ranges * np.cos(angles)
+            ys = cluster_ranges * np.sin(angles)
+
+            # Centroide en lidar_link
             cx = float(np.mean(xs))
             cy = float(np.mean(ys))
 
-            # Distancia centroide -> robot
-            dx = cx - self.pose.x
-            dy = cy - self.pose.y
-            d_centroid = float(math.sqrt(dx * dx + dy * dy))
+            point_lidar = PointStamped()
+            point_lidar.header.frame_id = msg.header.frame_id
+            point_lidar.header.stamp = msg.header.stamp
+            point_lidar.point.x = cx
+            point_lidar.point.y = cy
+            point_lidar.point.z = 0.0
+
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.target_frame, msg.header.frame_id, msg.header.stamp
+                )
+
+                point_transformed = tf2_geometry_msgs.do_transform_point(
+                    point_lidar, transform
+                )
+
+            except TransformException as ex:
+                self.get_logger().warn(f"TF error: {ex}")
+                return
 
             obs = Obstacle()
-            obs.x = cx
-            obs.y = cy
-            obs.distance = d_centroid
+            obs.x = point_transformed.point.x
+            obs.y = point_transformed.point.y
+            obs.distance = math.hypot(obs.x, obs.y)
 
             obstacles_msg.obstacles.append(obs)
 
