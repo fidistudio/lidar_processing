@@ -23,7 +23,8 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "obstacle_extractor_node = lidar_processing.obstacle_extractor_node:main"
+            "obstacle_extractor_node = lidar_processing.obstacle_extractor_node:main",
+            "obstacle_extractor_real_node = lidar_processing.obstacle_extractor_real_node:main",
         ],
     },
 )
